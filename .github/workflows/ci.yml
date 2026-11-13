@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Smoke test the mock API
+        run: |
+          node mock-server/index.js &
+          for i in $(seq 1 20); do curl -s http://localhost:4000/api/session > /dev/null && break; sleep 0.5; done
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:4000/api/employees)" = "401"
+          curl -sf -H 'Content-Type: application/json' -d '{"email":"admin@acme.test","password":"Passw0rd!"}' http://localhost:4000/api/session | grep -q '"role":"admin"'
