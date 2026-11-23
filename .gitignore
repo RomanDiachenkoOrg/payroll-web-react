@@ -9,3 +9,7 @@ npm-debug.log*
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# qualinaut: local state and secrets
+.qlt/
+.env

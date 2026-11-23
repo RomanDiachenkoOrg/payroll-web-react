@@ -1,0 +1,185 @@
+# Qualinaut pipeline (GitHub Actions), written by `qlt ci`. Edit freely.
+# Made from project.yaml e6959e282b50: `qlt doctor` says when it has changed.
+# Fast job: committed generated tests (smoke or healthcheck) on every change.
+# Scheduled job (0 3 * * *): `qlt run tests`, fails past `high`.
+# Set these as CI secrets: QLT_GITHUB_TOKEN, QLT_PASSWORD, QLT_USERNAME, SLACK_BOT_TOKEN.
+# QLT_GITHUB_TOKEN: a token that can read RomanDiachenko/qualinaut releases (Contents: read); qlt-install.py installs Qualinaut 0.5.9.26 with it.
+# No generated web tests yet: run `qlt run tests` and commit them.
+# Build of app read from the project: `npm ci`; set `build:` in project.yaml to change it.
+# Round summary: a last job (`round`) sums up every scheduled job from their artifacts (`qlt round`), in its job summary and the artifact `qa-round`,
+# with what changed since the previous run (its `qa-round`, when there is one).
+
+name: qa
+'on':
+  pull_request: null
+  push:
+    branches:
+    - main
+  schedule:
+  - cron: 0 3 * * *
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'How far to go: quick (minutes, a first look: a release checked), standard (about 30 minutes) or deep (hours, as the scheduled run)'
+        required: false
+        default: quick
+        type: choice
+        options:
+        - quick
+        - standard
+        - deep
+      target:
+        description: 'Explore only this target (its id; empty: every target)'
+        required: false
+        default: ''
+        type: string
+      chain:
+        description: 'Set by the workflow itself: which run of a chain going on with an unfinished exploration (0: a new one)'
+        required: false
+        default: '0'
+        type: string
+jobs:
+  explore:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.target == '' || inputs.target == 'app'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    concurrency:
+      group: qlt-${{ github.workflow }}-explore
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: write
+    env:
+      QLT_GITHUB_TOKEN: ${{ secrets.QLT_GITHUB_TOKEN }}
+      QLT_PASSWORD: ${{ secrets.QLT_PASSWORD }}
+      QLT_USERNAME: ${{ secrets.QLT_USERNAME }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      QLT_CHAIN: ${{ inputs.chain || '0' }}
+      QLT_CONTINUE: ${{ (inputs.chain || '0') != '0' && '--set ui-explorer.continue_unfinished=true --skip-review' || '' }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - run: python qlt-install.py
+    - run: playwright install --with-deps chromium
+    - uses: actions/setup-node@v4
+      with:
+        node-version: lts/*
+    - name: build app
+      run: npm ci
+    - if: (inputs.profile || 'deep') == 'deep'
+      uses: actions/cache/restore@v4
+      with:
+        path: '.qlt/cache
+
+          .qlt/qlt.db
+
+          .qlt/qlt.db-wal
+
+          .qlt/qlt.db-shm
+
+          .qlt/baseline
+
+          .qlt/knowledge'
+        key: qlt-cache-explore-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: qlt-cache-explore-
+    - run: qlt doctor
+    - run: qlt run tests --profile ${{ inputs.profile || 'deep' }} --fail-on high --time 5h $QLT_CONTINUE
+    - name: is the map unfinished
+      if: '!cancelled() && github.event_name != ''pull_request'' && (inputs.profile || ''deep'') == ''deep'''
+      run: "rm -f \"$RUNNER_TEMP/qlt-chain-next\"\nchain=\"${QLT_CHAIN:-0}\"\nif [ \"$chain\" -ge 20 ]; then\n  echo \"20 runs in a row: not going on (start the workflow to go on)\"\n  exit 0\nfi\nif qlt unfinished; then\n  echo \"\" >> \"$RUNNER_TEMP/qlt-chain-next\"\nfi\n"
+    - if: always() && (inputs.profile || 'deep') == 'deep'
+      uses: actions/cache/save@v4
+      with:
+        path: '.qlt/cache
+
+          .qlt/qlt.db
+
+          .qlt/qlt.db-wal
+
+          .qlt/qlt.db-shm
+
+          .qlt/baseline
+
+          .qlt/knowledge'
+        key: qlt-cache-explore-${{ github.run_id }}-${{ github.run_attempt }}
+    - name: go on in a next run if the map is unfinished
+      if: '!cancelled() && github.event_name != ''pull_request'' && (inputs.profile || ''deep'') == ''deep'''
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: "[ -f \"$RUNNER_TEMP/qlt-chain-next\" ] || exit 0\nchain=\"${QLT_CHAIN:-0}\"\nworkflow=\"${GITHUB_WORKFLOW_REF%@*}\"\nworkflow=\"${workflow##*/}\"\nwhile IFS= read -r target; do\n  gh workflow run \"$workflow\" -R \"$GITHUB_REPOSITORY\" --ref \"$GITHUB_REF_NAME\" -f target=\"$target\" -f profile=deep -f chain=$((chain + 1))\ndone < \"$RUNNER_TEMP/qlt-chain-next\"\n"
+    - if: always()
+      run: qlt report --format md >> "$GITHUB_STEP_SUMMARY" || true
+    - if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: qa
+        path: '.qlt/artifacts
+
+          generated-tests
+
+          golden'
+  round:
+    needs:
+    - explore
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    env:
+      QLT_GITHUB_TOKEN: ${{ secrets.QLT_GITHUB_TOKEN }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - run: python qlt-install.py
+    - name: the artifacts of the round's jobs
+      uses: actions/download-artifact@v4
+      with:
+        pattern: qa*
+        path: ${{ runner.temp }}/qlt-round
+    - name: the previous run's round
+      continue-on-error: true
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BRANCH: ${{ github.head_ref || github.ref_name }}
+        QLT_PROFILE: ${{ inputs.profile || 'deep' }}
+      run: "workflow=\"${GITHUB_WORKFLOW_REF%@*}\"\nworkflow=\"${workflow##*/}\"\nfor run in $(gh run list -R \"$GITHUB_REPOSITORY\" --workflow \"$workflow\" --branch \"$BRANCH\" --status completed --limit 10 --json databaseId --jq '.[].databaseId'); do\n  rm -rf \"${{ runner.temp }}/qlt-previous-round\"\n  if gh run download \"$run\" -R \"$GITHUB_REPOSITORY\" -n qa-round -D \"${{ runner.temp }}/qlt-previous-round\"; then\n    profile=$(jq -r '.profile // \"deep\"' \"${{ runner.temp }}/qlt-previous-round/round.json\")\n    if [ \"$profile\" = \"$QLT_PROFILE\" ]; then\n      echo \"compared with run $run\"\n      break\n    fi\n  fi\n  rm -rf \"${{ runner.temp }}/qlt-previous-round\"\ndone\n"
+    - name: one summary of the round
+      env:
+        QLT_NEEDS: ${{ toJSON(needs) }}
+        QLT_PROFILE: ${{ inputs.profile || 'deep' }}
+      run: 'echo "$QLT_NEEDS" > needs.json
+
+        qlt round ${{ runner.temp }}/qlt-round --jobs needs.json --output qa-round --profile "$QLT_PROFILE" --previous ${{ runner.temp }}/qlt-previous-round >> "$GITHUB_STEP_SUMMARY"
+
+        '
+    - if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: qa-round
+        path: qa-round
+  decisions:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      QLT_GITHUB_TOKEN: ${{ secrets.QLT_GITHUB_TOKEN }}
+      QLT_PASSWORD: ${{ secrets.QLT_PASSWORD }}
+      QLT_USERNAME: ${{ secrets.QLT_USERNAME }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - run: python qlt-install.py
+    - name: the decisions made in the review channel
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: "qlt knowledge sync\nif [ -z \"$(git status --porcelain -- qlt.knowledge.yaml)\" ]; then\n  echo \"no new decisions\"\n  exit 0\nfi\ngit config user.name \"github-actions[bot]\"\ngit config user.email \"41898282+github-actions[bot]@users.noreply.github.com\"\ngit checkout -B qlt/decisions\ngit add -- qlt.knowledge.yaml\ngit commit -m \"Qualinaut: decisions from the review channel\"\ngit push --force origin qlt/decisions\nif [ -z \"$(gh pr list --head qlt/decisions --state open --json number --jq '.[].number')\" ]; then\n  gh pr create --head qlt/decisions --base \"$GITHUB_REF_NAME\" --title \"Qualinaut: decisions\" --body \"What the deciders answered in the review channel, recorded by qlt knowledge sync. Merge it to keep the decisions in the repository; this pull request is updated while it is open.\"\nfi\n"

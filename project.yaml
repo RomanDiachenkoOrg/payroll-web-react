@@ -1,0 +1,41 @@
+# Qualinaut: what to test in this project and what to produce.
+# Written by Qualinaut 0.5.9.25.
+# Values can use environment variables: ${NAME} or ${NAME:-default}.
+version: 1  # the layout of this file; `qlt migrate` upgrades it
+name: "payroll-web-react"
+
+targets:
+  - id: app
+    platform: web
+    url: "http://localhost:5173"
+    sandbox:  # start the app for each run, stop it afterwards
+      provider: process
+      command: "npm run dev"
+      # Optional data reset between actions and test runs, e.g. pg_dump/psql:
+      # snapshot: ["<save test data to {dir}/{name}>"]
+      # restore: ["<load test data from {dir}/{name}>"]
+
+sources:
+  repos: ["."]  # source code: routes, guards, data access
+  docs: []  # specifications: md, txt, html, pdf, docx, OpenAPI
+  chats: []  # chat exports (Slack folders, JSON, text)
+
+oracle:
+  type: requirements  # requirements | recorded_snapshot | live_reference
+
+policy: intended  # intended | strict (pin observed behavior, bug for bug)
+
+pipeline:
+  goals: [test.results]  # test.results = explore, requirements, tests, run them
+  agents:  # which agents run; their options: qlt.settings.yaml
+    ui-explorer: {}
+    code-linker: {}
+    test-generator: {}
+    # vision-analyzer: {}  # needs qualinaut[vision] and ANTHROPIC_API_KEY
+  gates: []  # artifact kinds to approve before the pipeline continues
+
+# Own flows for `qlt run <name>`, next to the built-in discover/requirements/tests/code:
+flows: {}
+#  smoke:
+#    goals: [test.results]
+#    agents: {test-validator: {markers: smoke}}
